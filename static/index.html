@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Audio File Uploader</title>
+    <style>
+        /* Algemene stijl */
+        body {
+            font-family: 'Helvetica Neue', sans-serif;
+            background-color: #f9f9f9;
+            margin: 0;
+            padding: 0;
+        }
+
+        /* Container stijl */
+        .container {
+            max-width: 800px;
+            margin: 40px auto;
+            background-color: #fff;
+            padding: 20px;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+            border-radius: 10px;
+        }
+
+        /* Header stijl */
+        h1 {
+            color: #333;
+        }
+
+        /* Voortgangsbalk stijl */
+        progress {
+            position: center;
+            width: 80%;
+        }
+
+        /* Tekstgebied stijl */
+        textarea {
+            width: 100%;
+            padding: 10px;
+            margin-top: 20px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+
+        /* Button stijl */
+        button {
+            background-color: #007bff;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background-color: #0056b3;
+        }
+
+        #uploadMessage {
+        margin-left: 10px;
+        color: green;
+        }
+
+        #log-container {
+        margin-top: 20px;
+        padding: 15px;
+        box-shadow: 0px 0px 12px 1px rgba(0,0,0,0.1);
+        border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h1>Select an audio file</h1>
+
+        <input type="file" id="audioFile" accept="audio/*">
+        <button onclick="uploadAudio()">Upload</button>
+        <span id="uploadMessage"></span>
+
+
+        <!-- Toegevoegde voortgangsbalk en tekstgebied -->
+        <div id="progress-container">
+            <progress id="progressBar" max="100" value="0"></progress>
+            <textarea id="outputArea" rows="4" placeholder="Processing output will appear here..."></textarea>
+        </div>
+
+        <div id="resultArea"></div>
+
+        <!-- Log Area -->
+        <div id="log-container">
+            <h3>Logs</h3>
+            <textarea id="logArea" rows="4" cols="50" readonly></textarea>
+        </div>
+    </div>
+
+<script>
+async function uploadAudio() {
+    const fileInput = document.getElementById('audioFile');
+    const file = fileInput.files[0];
+    const formData = new FormData();
+    formData.append('audio_file', file);
+
+    document.getElementById("uploadMessage").textContent = "Upload gestart";
+
+    // URL van het SSE endpoint voor voortgangsrapportage
+    const progressUrl = 'https://backendswag-wtajjbsheq-ez.a.run.app/progress';
+
+    // Luister naar SSE
+    const eventSource = new EventSource(progressUrl);
+    eventSource.onmessage = function(event) {
+        document.getElementById("progress-container").style.display = "block";
+        const data = JSON.parse(event.data);
+        document.getElementById("progressBar").value = data.progress;
+        document.getElementById("outputArea").textContent = data.message;
+    };
+
+    const backendUrl = 'https://backendswag-wtajjbsheq-ez.a.run.app/upload_audio';
+    
+    try {
+        const response = await fetch(backendUrl, {
+            method: 'POST',          // Methode
+            mode: 'cors',            // CORS modus
+            cache: 'no-cache',       // Cache-instellingen
+            credentials: 'same-origin', // Credentials
+            redirect: 'follow',     // Redirect opties
+            referrerPolicy: 'no-referrer', // Referrer policy
+            body: formData          // Lichaam van de aanvraag
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            const summary = data.result.summary;
+            const transcript = data.result.transcript;
+            document.getElementById("outputArea").value = `Summary:\n${summary}\n\nTranscript:\n${transcript}`;
+            console.log(data);
+        } else {
+            console.log('Failed to upload audio:', response.statusText);
+        }
+    } catch (error) {
+        console.error('An error occurred:', error);
+    }
+    document.getElementById("uploadMessage").textContent = "";
+}
+
+</script>
+
+</body>
+</html>

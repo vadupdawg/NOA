@@ -1,4 +1,6 @@
-from flask import Flask, request, jsonify
+import json
+from flask import Flask, request, jsonify, Response, stream_with_context
+from flask_cors import cross_origin
 from pydub import AudioSegment
 import openai
 import os
@@ -7,27 +9,77 @@ from langchain.prompts import PromptTemplate
 from langchain.chat_models import ChatOpenAI
 from langchain.chains import RefineDocumentsChain, LLMChain, SimpleSequentialChain
 from transformers import AutoModelForCausalLM
+import time
+import logging
 
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
+PROJECT = 'stt2langchain1'
+
+# Build structured log messages as an object.
+global_log_fields = {}
+request_is_defined = "request" in globals() or "request" in locals()
+if request_is_defined and request:
+    trace_header = request.headers.get("X-Cloud-Trace-Context")
+    if trace_header and PROJECT:
+        trace = trace_header.split("/")
+        global_log_fields[
+            "logging.googleapis.com/trace"
+        ] = f"projects/{PROJECT}/traces/{trace[0]}"
+def log_message(message, severity="NOTICE", **additional_fields):
+    entry = {
+        "message": message,
+        "severity": severity,
+        **global_log_fields,
+        **additional_fields,
+    }
+    print(json.dumps(entry))
+
+
+current_progress = 0
+TRANSCRIBE_WEIGHT = 25  # Gewicht van transcribe_audio in %
+SUMMARIZE_WEIGHT = 55  # Gewicht van summarize_transcript in %
+
+def update_progress(progress, weight):
+    global current_progress
+    current_progress += progress * weight / 100
+    if current_progress > 100:
+        current_progress = 100
+
+
 @app.route('/upload_audio', methods=['POST'])
+@cross_origin()
 def upload_audio():
+    global current_progress
+    log_message("Received request to /upload_audio")
+    app.logger.info("Received request to /upload_audio")
+    current_progress = 0
     audio_file = request.files.get('audio_file')
+    log_message("Received audio file")
+    
     if not audio_file:
         return jsonify({"error": "No audio file provided"}), 400
     
-    # Saving the uploaded file
     file_path = os.path.join("uploads", audio_file.filename)
+    log_message("File path is " + file_path)
     if not os.path.exists('uploads'):
         os.makedirs('uploads')
     audio_file.save(file_path)
-    
-    # Invoke your existing function to process the audio file
     result = select_audio_file(file_path)
-    return jsonify({"result": result})
+    app.logger.info("Successfully processed the request")
+
+    if result:  # Assuming 'result' contains meaningful data
+        return jsonify({"result": result}), 200
+    else:
+        return jsonify({"error": "File processing failed"}), 400
+    
+
 
 # Your existing functions
 def select_audio_file(file_path):
+    global current_progress
     if file_path:
         file_size = os.path.getsize(file_path)
         full_transcript = ""
@@ -40,9 +92,11 @@ def select_audio_file(file_path):
             full_transcript = transcribe_audio(file_path)
 
         summary = summarize_transcript(full_transcript)
+        update_progress(100, SUMMARIZE_WEIGHT)
         return {"transcript": full_transcript, "summary": summary}
 
 def split_audio_file(file_path):
+    global current_progress
     audio = AudioSegment.from_file(file_path)
     file_size = len(audio)
     chunk_length = 600000
@@ -53,19 +107,23 @@ def split_audio_file(file_path):
         split_file_path = f"{file_path}_part_{i}.mp3"
         chunk.export(split_file_path, format="mp3")
         split_files.append(split_file_path)
-        
+
     return split_files
 
 def transcribe_audio(file_path):
+    global current_progress
     with open(file_path, "rb") as audio_file:
         transcript = openai.Audio.transcribe("whisper-1", audio_file)
+    update_progress(100, TRANSCRIBE_WEIGHT)
     return transcript['text']
+
 class CustomDocument:
     def __init__(self, page_content, metadata={}):
         self.page_content = page_content
         self.metadata = metadata
 
 def summarize_transcript(transcript):
+    global current_progress
     # Your existing setup code
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=15000, chunk_overlap=500
@@ -115,6 +173,7 @@ def summarize_transcript(transcript):
         Gebruik zoveel mogelijk tokens.
         """
     )
+    
     refine_llm_chain = LLMChain(
         llm=llm_long_context, 
         prompt=refine_prompt, 
@@ -133,12 +192,12 @@ def summarize_transcript(transcript):
 
     # Aanmaken van een nieuwe prompt voor het sorteren van de samenvatting
     sort_prompt = """
-    Gegeven de volgende notulen van een vergadering:
-    {summary}
-    Sorteer, categorizeer en verfijn deze notulen zodat wat opgeleverd wordt een overzichtelijk, informatief en duidelijke notule is.
-    Probeer door middel van kopjes de notule te structureren.
-    gebruik zoveel mogelijk tokens, maar zorg ervoor dat er geen data dubbel in de notule staat.
-    """
+        Gegeven de volgende notulen van een vergadering:
+        {summary}
+        Sorteer, categorizeer en verfijn deze notulen zodat wat opgeleverd wordt een overzichtelijk, informatief en duidelijke notule is.
+        Probeer door middel van kopjes de notule te structureren.
+        gebruik zoveel mogelijk tokens, maar zorg ervoor dat er geen data dubbel in de notule staat.
+        """
     sort_prompt_template = PromptTemplate(template=sort_prompt, input_variables=["summary"])
 
     # Aanmaken van een nieuwe LLMChain om het sorteren te behandelen
@@ -159,6 +218,17 @@ def summarize_transcript(transcript):
     
     return results
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080)
+@app.route('/progress')
+@cross_origin()
+def progress():
+    def generate():
+        global current_progress
+        while current_progress < 100:  # Of een andere voorwaarde voor voltooiing
+            yield f"data: {{\"progress\": {current_progress}, \"message\": \"Step {current_progress}\"}}\n\n"
+            time.sleep(1)
+        yield f"data: {{\"progress\": 100, \"message\": \"Done\"}}\n\n"  # Eindsignaal
 
+    return Response(generate(), mimetype='text/event-stream')
+
+if __name__ == '__main__':
+    app.run(port=int(os.environ.get("PORT", 8080)),host='0.0.0.0',debug=True)
