@@ -77,6 +77,10 @@
         <button onclick="uploadAudio()">Upload</button>
         <span id="uploadMessage"></span>
 
+        <label for="email">Email:</label>
+        <input type="email" id="email" name="email">
+
+
 
         <!-- Toegevoegde voortgangsbalk en tekstgebied -->
         <div id="progress-container">
@@ -96,51 +100,51 @@
 <script>
 async function uploadAudio() {
     const fileInput = document.getElementById('audioFile');
+    const emailInput = document.getElementById('email');
     const file = fileInput.files[0];
-    const formData = new FormData();
-    formData.append('audio_file', file);
+    const email = emailInput.value;
 
-    document.getElementById("uploadMessage").textContent = "Upload gestart";
+    if (!file || !email) {
+        console.log("Zowel het bestand als het e-mailadres zijn vereist.");
+        return;
+    }
 
-    // URL van het SSE endpoint voor voortgangsrapportage
-    const progressUrl = 'https://backendswag-wtajjbsheq-ez.a.run.app/progress';
+    const blobName = file.name;
 
-    // Luister naar SSE
-    const eventSource = new EventSource(progressUrl);
-    eventSource.onmessage = function(event) {
-        document.getElementById("progress-container").style.display = "block";
-        const data = JSON.parse(event.data);
-        document.getElementById("progressBar").value = data.progress;
-        document.getElementById("outputArea").textContent = data.message;
-    };
+    const signedUrlResponse = await fetch('https://flask-app-wtajjbsheq-ez.a.run.app/get_signed_url', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ blob_name: blobName, email: email })
+    });
 
-    const backendUrl = 'https://backendswag-wtajjbsheq-ez.a.run.app/upload_audio';
-    
-    try {
-        const response = await fetch(backendUrl, {
-            method: 'POST',          // Methode
-            mode: 'cors',            // CORS modus
-            cache: 'no-cache',       // Cache-instellingen
-            credentials: 'same-origin', // Credentials
-            redirect: 'follow',     // Redirect opties
-            referrerPolicy: 'no-referrer', // Referrer policy
-            body: formData          // Lichaam van de aanvraag
+    if (signedUrlResponse.ok) {
+        const signedUrlData = await signedUrlResponse.json();
+        const signedUrl = signedUrlData.signed_url;
+
+        const uploadResponse = await fetch(signedUrl, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/octet-stream'
+            },
+            body: file
         });
 
-        if (response.ok) {
-            const data = await response.json();
-            const summary = data.result.summary;
-            const transcript = data.result.transcript;
-            document.getElementById("outputArea").value = `Summary:\n${summary}\n\nTranscript:\n${transcript}`;
-            console.log(data);
+        if (uploadResponse.ok) {
+            console.log('Upload succeeded');
+            // Hier kun je een bevestiging naar de server sturen dat de upload is voltooid
         } else {
-            console.log('Failed to upload audio:', response.statusText);
+            console.log('Upload failed:', uploadResponse.statusText);
+            // Hier kun je een retry-mechanisme implementeren
         }
-    } catch (error) {
-        console.error('An error occurred:', error);
+    } else {
+        console.log('Failed to get signed URL:', signedUrlResponse.statusText);
     }
+
     document.getElementById("uploadMessage").textContent = "";
 }
+
 
 </script>
 

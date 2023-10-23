@@ -7,11 +7,12 @@ ENV PYTHONUNBUFFERED=1
 # Stel de werkmap in de container in
 WORKDIR /app
 
-# Installeer git
+# Installeer git en andere benodigdheden
 RUN apt-get update && apt-get install -y git
 RUN pip install --upgrade pip
 RUN pip install gunicorn
 
+# Kopieer alleen requirements.txt eerst om de Docker cache beter te benutten
 COPY requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt
 
@@ -19,4 +20,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . /app/
 
 # Start de applicatie
-CMD ["gunicorn", "-b", "0.0.0.0:8080", "--timeout", "3600", "app:app"]
+CMD ["gunicorn", "-b", "0.0.0.0:8080", "--timeout", "60", "flask_app:app"]
