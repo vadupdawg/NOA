@@ -1,3 +1,6 @@
+from collections import defaultdict
+import io
+from io import BytesIO
 from flask_cors import cross_origin
 from pydub import AudioSegment
 import openai
@@ -5,10 +8,9 @@ import os
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.prompts import PromptTemplate
 from langchain.chat_models import ChatOpenAI
-from langchain.chains import RefineDocumentsChain, LLMChain, SimpleSequentialChain
+from langchain.chains import LLMChain
 import logging
 import json
-from google import pubsub_v1
 from google.cloud import storage
 import smtplib
 from email.mime.text import MIMEText
@@ -17,10 +19,10 @@ from flask import Flask, request, jsonify
 import base64
 from google.cloud import tasks_v2
 from google.cloud import storage
+import time
 
 CLOUD_BUCKET_NAME = "stt-noa"
 PROJECT = 'stt2langchain1'
-access_token=os.getenv("HUGGINGFACE_API_KEY")
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -40,171 +42,177 @@ def process_message(message):
     message_data = json.loads(message)
     email = message_data.get('email')
     audio_file_name = message_data.get('audio_file_name')
-    file_extension = os.path.splitext(audio_file_name)[1]
-    local_file_name = f"{audio_file_name}_notule{file_extension}"
-    download_audio_from_gcs(CLOUD_BUCKET_NAME, audio_file_name, local_file_name)
-    result = select_audio_file(local_file_name)
+    dynamic_fields = message_data.get('dynamic_fields', {})
+    categories = list(dynamic_fields.values())
+    message_data = json.loads(message)
+    model_type = message_data.get('model_type')
 
-    if result and email:
-        transcript = result.get("transcript", "Geen transcript beschikbaar")
-        summary = result.get("summary", "Geen samenvatting beschikbaar")
-        send_email(email, transcript, summary)
+    summaries = []
+    transcripts = []
 
-    print(f"Verwerking voltooid. Resultaat: {result}")
+    if not check_file_upload(CLOUD_BUCKET_NAME, audio_file_name):
+        return "File not uploaded", 400
+    file_size = get_file_size_from_gcs(CLOUD_BUCKET_NAME, audio_file_name)
+
+    if file_size > 25 * 1024 * 1024:
+        split_audio_files = split_audio_file_gcs(CLOUD_BUCKET_NAME, audio_file_name)
+        for split_file in split_audio_files:
+            transcript = transcribe_audio_gcs(CLOUD_BUCKET_NAME, split_file)
+            transcripts.append(transcript)
+            summary = summarize_transcript(transcript, categories, model_type)
+            summaries.append(summary)
+    else:
+        transcript = transcribe_audio_gcs(CLOUD_BUCKET_NAME, audio_file_name)
+        transcripts.append(transcript)
+        summary = summarize_transcript(transcript, categories, model_type)
+        summaries.append(summary)
+
+    final_summary = "\n".join(summaries)
+    final_transcript = "\n".join(transcripts)
+
+    organized_summaries = defaultdict(list)
+    current_key = None
+    for summary in summaries:
+        for line in summary.strip().split('\n'):
+            if any(line.startswith(cat + ":") for cat in categories):
+                current_key = line.rstrip(":")
+            elif current_key is not None:
+                organized_summaries[current_key].append(line.strip())
+
+
+    final_summary = ""
+    for key in categories:
+        final_summary += f"{key}:\n"
+        final_summary += ' '.join(organized_summaries[key])
+        final_summary += "\n\n"
+
+    if email:
+        formatted_final_summary = format_summary_text(final_summary)
+        send_email(email, final_transcript, formatted_final_summary)
+
+    print(f"Verwerking voltooid. Samenvatting: {final_summary}")
     return "Message processed", 200
 
-def download_audio_from_gcs(bucket_name, source_blob_name, destination_file_name):
+def format_summary_text(text):
+    formatted_lines = []
+    for line in text.split('\n'):
+        if line.endswith(':'):
+            formatted_lines.append("\n" + line)
+        else:
+            formatted_lines.extend([f"- {x.strip()}" for x in line.split('-') if x.strip()])
+    formatted_text = '\n'.join(formatted_lines)
+    return formatted_text
+
+
+def check_file_upload(bucket_name, blob_name, retries=3, delay=10):
     storage_client = storage.Client()
     bucket = storage_client.bucket(bucket_name)
-    blob = bucket.blob(source_blob_name)
-    blob.download_to_filename(destination_file_name)
-
-    print(f"Blob {source_blob_name} downloaded to {destination_file_name}.")
-
-def select_audio_file(file_path):
-
-    if file_path:
-        file_size = os.path.getsize(file_path)
-        full_transcript = ""
-        if file_size > 25 * 1024 * 1024:
-            split_audio_files = split_audio_file(file_path)
-            for split_file in split_audio_files:
-                text = transcribe_audio(split_file)
-                full_transcript += text + "\n"
-        else:
-            full_transcript = transcribe_audio(file_path)
-
-        summary = summarize_transcript(full_transcript)
-        return {"transcript": full_transcript, "summary": summary}
     
-def transcribe_audio(file_path):
+    for i in range(retries):
+        blob = bucket.get_blob(blob_name)
+        if blob and blob.size:
+            print(f"Bestand {blob_name} is succesvol geüpload met grootte {blob.size} bytes.")
+            return True
+        print(f"Bestand {blob_name} is nog niet geüpload, wachten {delay} seconden...")
+        time.sleep(delay)
+        delay *= 2  # Exponentiële backoff
+    
+    print(f"Bestand {blob_name} is niet geüpload na {retries} pogingen.")
+    return False
 
-    with open(file_path, "rb") as audio_file:
-        transcript = openai.Audio.transcribe("whisper-1", audio_file)
+def get_file_size_from_gcs(bucket_name, blob_name):
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.get_blob(blob_name)
+    return blob.size if blob else 0
+
+def transcribe_audio_gcs(bucket_name, blob_name):
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(blob_name)
+    
+    audio_data = blob.download_as_bytes()
+    audio_file = BytesIO(audio_data)
+    audio_file.name = blob_name
+    
+    transcript = openai.Audio.transcribe("whisper-1", audio_file)
     return transcript['text']
 
-def upload_blob(bucket_name, source_file_name, destination_blob_name):
-    """Uploads a file to the bucket."""
+def split_audio_file_gcs(bucket_name, blob_name):
     storage_client = storage.Client()
     bucket = storage_client.bucket(bucket_name)
-    blob = bucket.blob(destination_blob_name)
-
-    blob.upload_from_filename(source_file_name)
-
-
-def split_audio_file(bucket_name, file_path):
-
-    audio = AudioSegment.from_file(file_path)
-    file_size = len(audio)
-    chunk_length = 1000000
-    chunks = [audio[i:i + chunk_length] for i in range(0, file_size, chunk_length)]
+    blob = bucket.blob(blob_name)
+    
+    audio_data = blob.download_as_bytes()
+    audio = AudioSegment.from_file(io.BytesIO(audio_data), format="mp3")
+    
+    chunk_length = 100000
+    chunks = [audio[i:i + chunk_length] for i in range(0, len(audio), chunk_length)]
     
     split_files = []
     for i, chunk in enumerate(chunks):
-        split_file_path = f"{file_path}_part_{i}.mp3"
-        chunk.export(split_file_path, format="mp3")
+        buffer = io.BytesIO()
+        chunk.export(buffer, format="mp3")
         
-        # Upload het gesplitste bestand naar de GCS bucket
-        destination_blob_name = f"audio_chunks/{split_file_path}"
-        upload_blob(bucket_name, split_file_path, destination_blob_name)
+        buffer_size = len(buffer.getbuffer())
+        if buffer_size > 25 * 1024 * 1024:
+            continue
         
-        split_files.append(destination_blob_name)
+        split_file_path = f"{blob_name}_part_{i}.mp3"
+        
+        split_blob = bucket.blob(split_file_path)
+        split_blob.upload_from_string(buffer.getvalue(), content_type='audio/mp3')
+        
+        split_files.append(split_file_path)
 
     return split_files
+
 
 class CustomDocument:
     def __init__(self, page_content, metadata={}):
         self.page_content = page_content
         self.metadata = metadata
 
-def summarize_transcript(transcript):
+def summarize_transcript(transcript, categories, model_type):
+    dynamic_prompt_parts = ["Extraheer uit het deel van de vergadering de volgende informatie\n'"]
+    for cat in categories:
+        dynamic_prompt_parts.append(f"{cat}:")
+    dynamic_prompt_parts.append("'")
+    dynamic_prompt = "\n".join(dynamic_prompt_parts)
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=15000, chunk_overlap=500
+        chunk_size=5000, chunk_overlap=1000
     )
-    llm2 = ChatOpenAI(temperature=0, openai_api_key=os.getenv("OPENAI_API_KEY"), model_name="gpt-4")
-    llm = ChatOpenAI(temperature=0, openai_api_key=os.getenv("OPENAI_API_KEY"), model_name="gpt-3.5-turbo-16k")
+    if model_type == 'gpt3':
+        llm = ChatOpenAI(temperature=0, openai_api_key=os.getenv("OPENAI_API_KEY"), model_name="gpt-3.5-turbo-16k")
+    elif model_type == 'gpt4':
+        llm = ChatOpenAI(temperature=0, openai_api_key=os.getenv("OPENAI_API_KEY"), model_name="gpt-4")
+
 
     docs = text_splitter.create_documents([transcript])
     
-    document_prompt = PromptTemplate(
-        input_variables=["page_content"],
-        template="{page_content}"
+    template ="""
+        '
+        {dynamic_prompt}
+        '
+        Schrijf zo uitgebreid en gedetailleerd mogelijk.
+        Voeg onder deze kopjes de desbetreffende informatie met opsommingstekens, een opsommingsteken is "-".
+        Je hoeft dus alleen de kopjes hierboven te gebruiken en kan de rest weglaten.
+        Zorg ervoor dat elke regel opzichzelf genoeg verduidelijking geeft
+        Dit is een deel van de vergadering:
+        "{docs}"
+        Begin nu:
+        """
+    prompt = PromptTemplate(
+        template=template, input_variables=["dynamic_prompt", "docs"]
     )
 
-    document_variable_name = "context"
-    initial_response_name = "prev_response"
-    
-    initial_prompt = PromptTemplate.from_template(
-        """
-        Het volgende is een deel van de vergadering:
-        "{context}"
-        Zoek hieruit de belangrijkste data voor een notule, actiepunten, gebeurtenissen, besprekingen, onderwerpen etc. 
-        Hou de volgorde in stand en geef aan welke acties tot personen behoren.
-        Gebruik zoveel mogelijk tokens.
-        DATA:
-        """
-    )
-
-    initial_llm_chain = LLMChain(
+    llmchain = LLMChain(
         llm=llm,
-        prompt=initial_prompt,
-        verbose=False
+        prompt=prompt,
+        verbose=True
         )
     
-    refine_prompt = PromptTemplate.from_template(
-        """
-        Je krijgt data van een deel van een vergadering.
-        Het is jouw taak om deze data vorm te geven als een notule, het is niet erg dat de notule nog niet compleet is of eruit ziet als een notule, dat komt in een latere stap
-        Hier is de data die je moet gebruiken: "{prev_response}"
-        We hebben de mogelijkheid om de bestaande notule opnieuw te controleren.
-        Pas aan waar meer context nodig is wanneer het in de bestaande notule niet duidelijk is.
-        Blijf dus de hele tekst evalueren.
-        ------------
-        {context}
-        ------------
-        Gezien de nieuwe context, verfijn en verrijk de oorspronkelijke notule.
-        Gebruik zoveel mogelijk tokens.
-        """
-    )
-    
-    refine_llm_chain = LLMChain(
-        llm=llm,
-        prompt=refine_prompt,
-        verbose=False
-        )
-    
-    refine_chain = RefineDocumentsChain(
-        initial_llm_chain=initial_llm_chain,
-        refine_llm_chain=refine_llm_chain,
-        document_prompt=document_prompt,
-        document_variable_name=document_variable_name,
-        initial_response_name=initial_response_name,
-        return_intermediate_steps=False,
-        verbose=False
-    )
-
-    sort_prompt = """
-        Gegeven de volgende notulen van een vergadering:
-        {summary}
-        Sorteer, categorizeer en verfijn deze notulen zodat wat opgeleverd wordt een overzichtelijk, informatief en duidelijke notule is.
-        Probeer door middel van kopjes de notule te structureren.
-        gebruik zoveel mogelijk tokens, maar zorg ervoor dat er geen data dubbel in de notule staat.
-        Blijf dus de gehele tekst evalueren.
-        """
-    sort_prompt_template = PromptTemplate(template=sort_prompt, input_variables=["summary"])
-
-    sort_llm_chain = LLMChain(
-        llm=llm2,
-        prompt=sort_prompt_template,
-        verbose=False
-        )
-    
-    overall_chain = SimpleSequentialChain(
-        chains=[refine_chain, sort_llm_chain], 
-        verbose=False
-    )
-    
-    results = overall_chain.run(docs)
+    results = llmchain.predict(dynamic_prompt=dynamic_prompt, docs=docs)
     
     return results
 
@@ -220,7 +228,7 @@ def send_email(email, transcript, summary):
     msg['To'] = to_email
     msg['Subject'] = subject
 
-    body = f"Transcript:\n{transcript}\n\nSamenvatting:\n{summary}"
+    body = f"Transcript:\n{transcript}\nNotule:\n{summary}"
     msg.attach(MIMEText(body, 'plain'))
 
     smtp_server = "mail.privateemail.com"
@@ -290,15 +298,5 @@ def task_handler():
     process_message(json.dumps(payload))
     return "Task completed", 200
 
-
 if __name__ == '__main__':
     app.run(port=int(os.environ.get("PORT", 8080)), host='0.0.0.0', debug=True)
-
-    subscriber = pubsub_v1.SubscriberClient()
-    subscription_path = subscriber.subscription_path(PROJECT, 'long-running-tasks-sub')
-    
-    def callback(message):
-        print(f"Received message: {message}")
-        process_message(message.data.decode('utf-8'))
-    subscriber.subscribe(subscription_path, callback=callback)
-    

@@ -3,9 +3,11 @@ flask-cors==4.0.0
 protobuf==4.24.4
 google-cloud-storage
 google-cloud-pubsub
+google-cloud-firestore
 werkzeug==2.2.3
 six
 google-cloud-secret-manager
 google-auth
 ffprobe
 ffmpeg
+stripe

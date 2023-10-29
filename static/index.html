@@ -1,128 +1,180 @@
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Audio File Uploader</title>
-    <style>
-        /* Algemene stijl */
-        body {
-            font-family: 'Helvetica Neue', sans-serif;
-            background-color: #f9f9f9;
-            margin: 0;
-            padding: 0;
-        }
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <script src="https://js.stripe.com/v3/"></script>
+        <title>Audio File Uploader</title>
+        <style>
+            body {
+                font-family: 'Helvetica Neue', sans-serif;
+                background-color: #f2f3f7;
+                margin: 0;
+                padding: 0;
+            }
+        
+            .container {
+                max-width: 800px;
+                margin: 5% auto; 
+                background-color: #fff;
+                padding: 30px; 
+                box-shadow: 0 4px 15px rgba(0, 0, 0, 0.15); 
+                border-radius: 12px; 
+            }
+        
+            h1 {
+                color: #2c3e50; 
+                margin-bottom: 25px;
+            }
+        
+            progress {
+                width: 80%;
+                margin-top: 10px;
+                margin-bottom: 20px;
+            }
+        
+            textarea, select, input {
+                width: 100%;
+                padding: 12px;
+                margin-top: 10px;
+                margin-bottom: 20px; 
+                border: 1px solid #ccc;
+                border-radius: 6px;
+                font-size: 16px;
+                max-width: 90%;
+                margin-left: auto;
+                margin-right: auto;
+                display: block;
+            }
+        
+            button {
+                padding: 12px 25px;
+                font-size: 16px;
+                background-color: #007bff;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                cursor: pointer;
+                margin-bottom: 10px;
+                box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            }
 
-        /* Container stijl */
-        .container {
-            max-width: 800px;
-            margin: 40px auto;
-            background-color: #fff;
-            padding: 20px;
-            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
-            border-radius: 10px;
-        }
+            .uploadBtn {
+                width: 150px;
+                background-color: #4CAF50;
+                font-size: 18px;
+                margin: 20px auto;
+                display: block;
+                transition: background-color 0.3s ease;
+            }
 
-        /* Header stijl */
-        h1 {
-            color: #333;
-        }
+            .uploadBtn:hover {
+                background-color: #45a049;
+            }
 
-        /* Voortgangsbalk stijl */
-        progress {
-            position: center;
-            width: 80%;
-        }
-
-        /* Tekstgebied stijl */
-        textarea {
-            width: 100%;
-            padding: 10px;
-            margin-top: 20px;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-        }
-
-        /* Button stijl */
-        button {
-            background-color: #007bff;
-            color: white;
-            padding: 10px 20px;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-        }
-
-        button:hover {
-            background-color: #0056b3;
-        }
-
-        #uploadMessage {
-        margin-left: 10px;
-        color: green;
-        }
-
-        #log-container {
-        margin-top: 20px;
-        padding: 15px;
-        box-shadow: 0px 0px 12px 1px rgba(0,0,0,0.1);
-        border-radius: 5px;
-        }
-    </style>
+        
+            button:hover {
+                background-color: #0056b3;
+            }
+        
+            label {
+                display: block;
+                margin-bottom: 8px; 
+            }
+        
+            #uploadMessage {
+                margin-left: auto;
+                margin-right: auto;
+                color: green;
+            }
+        
+            #log-container {
+                margin-top: 20px;
+                padding: 15px;
+                box-shadow: 0px 0px 12px 1px rgba(0,0,0,0.1);
+                border-radius: 5px;
+                overflow-y: auto;
+                max-height: 200px;
+            }
+        </style>
 </head>
 <body>
-
     <div class="container">
-        <h1>Select an audio file</h1>
+        <h1>Notuleer uw audio bestand op termen naar wens!</h1>
+        <p>Selecteer een audiobestand, voer uw e-mailadres in en voer de gewenste zoektermen in. Het systeem zal het audiobestand scannen op basis van uw ingevoerde termen.</p>
 
-        <input type="file" id="audioFile" accept="audio/*">
-        <button onclick="uploadAudio()">Upload</button>
-        <span id="uploadMessage"></span>
-
+        <input type="file" id="audioFile" accept="audio/*" onchange="updatePriceEstimation()">
+        <span id="fileError" style="color: red; display: none;">Selecteer een audiobestand.</span>
+        
         <label for="email">Email:</label>
         <input type="email" id="email" name="email">
+        <span id="emailError" style="color: red; display: none;">Voer een geldig e-mailadres in.</span>
 
+        <label for="modelType">Kies het modeltype:</label>
+        <select id="modelType">
+            <option value="gpt3">GPT-3 (€7,50 per uur)</option>
+            <option value="gpt4">GPT-4 (€11,50 per uur)</option>
+        </select>
+        
+        <div id="priceEstimation"><strong>Prijs: €0.00</strong></div>
 
-
-        <!-- Toegevoegde voortgangsbalk en tekstgebied -->
-        <div id="progress-container">
-            <progress id="progressBar" max="100" value="0"></progress>
-            <textarea id="outputArea" rows="4" placeholder="Processing output will appear here..."></textarea>
+        <p>De ingevoerde termen hieronder worden gebruikt om het audiobestand te scannen:</p>
+        <div id="dynamicFields">
+            <div class="dynamicField">
+                <label for="dynamicField1">Term waar naar gezocht moet worden:</label>
+                <input type="text" id="dynamicField1" name="dynamicField1" placeholder="Actiepunten/besprekkingen/datums/etc.">
+                <span id="dynamicFieldError" style="color: red; display: none;">Vul ten minste één zoekterm in.</span>
+            </div>
         </div>
-
-        <div id="resultArea"></div>
-
-        <!-- Log Area -->
-        <div id="log-container">
-            <h3>Logs</h3>
-            <textarea id="logArea" rows="4" cols="50" readonly></textarea>
-        </div>
+        <button onclick="addDynamicField()">Voeg veld toe</button>
+        
+    
+        <button class="uploadBtn" onclick="startCheckout()">Upload</button>
+        <p id="uploadMessage"></p>
     </div>
-
 <script>
-async function uploadAudio() {
-    const fileInput = document.getElementById('audioFile');
-    const emailInput = document.getElementById('email');
-    const file = fileInput.files[0];
-    const email = emailInput.value;
+    var stripe = Stripe('pk_live_51NVZCAI2xDWQZFzgWHGJboKPKRl2opSMzSlvbOqiKrlrXaEQ8rLDUZtgSKyL4SVWyGUdnCuttjehnjcjYkawDZBf00KFlH0xWE');
 
-    if (!file || !email) {
-        console.log("Zowel het bestand als het e-mailadres zijn vereist.");
-        return;
+    async function startCheckout() {
+    const estimatedPrice = Math.round(parseFloat(document.getElementById('priceEstimation').textContent.replace('Geschatte prijs: €', '')) * 100);
+
+    const email = document.getElementById('email').value;
+    const modelType = document.getElementById('modelType').value;
+    const file = document.getElementById('audioFile').files[0];
+    const fileName = file.name;
+
+    let dynamicFields = {};
+    for (let i = 1; i <= fieldCount; i++) {
+        const fieldElement = document.getElementById(`dynamicField${i}`);
+        if (fieldElement) {
+            dynamicFields[`dynamicField${i}`] = fieldElement.value;
+        }
     }
 
-    const blobName = file.name;
+    const payload = {
+        fileName,
+        amount: estimatedPrice,
+        email,
+        modelType,
+        dynamicFields
+        };
 
-    const signedUrlResponse = await fetch('https://flask-app-wtajjbsheq-ez.a.run.app/get_signed_url', {
+
+    const sessionResponse = await fetch('https://flask-app-wtajjbsheq-ez.a.run.app/create-checkout-session', {
         method: 'POST',
         headers: {
-            'Content-Type': 'application/json'
+        'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ blob_name: blobName, email: email })
+        body: JSON.stringify(payload)
     });
+    console.log("sessionResponse:", sessionResponse)
 
-    if (signedUrlResponse.ok) {
-        const signedUrlData = await signedUrlResponse.json();
-        const signedUrl = signedUrlData.signed_url;
+    const sessionData = await sessionResponse.json();
+    console.log("Session Data:", sessionData); 
+    const signedUrl = sessionData.signed_url;
+    console.log("signedUrl:", signedUrl)
+    const sessionId = sessionData.id;
 
+    if (signedUrl) {
         const uploadResponse = await fetch(signedUrl, {
             method: 'PUT',
             headers: {
@@ -132,21 +184,92 @@ async function uploadAudio() {
         });
 
         if (uploadResponse.ok) {
-            console.log('Upload succeeded');
-            // Hier kun je een bevestiging naar de server sturen dat de upload is voltooid
+            console.log('File successfully uploaded');
         } else {
-            console.log('Upload failed:', uploadResponse.statusText);
-            // Hier kun je een retry-mechanisme implementeren
+            console.log('File upload failed');
         }
-    } else {
-        console.log('Failed to get signed URL:', signedUrlResponse.statusText);
     }
 
-    document.getElementById("uploadMessage").textContent = "";
+    const {error} = await stripe.redirectToCheckout({
+        sessionId: sessionId
+    });
+
+    if (error) {
+        console.log(error);
+    }
+    }
+
+    function updatePriceEstimation() {
+    const fileSizeMB = document.getElementById('audioFile').files[0]?.size / (1024 * 1024);
+    const modelType = document.getElementById('modelType').value;
+
+    let pricePerMB;
+    if (modelType === 'gpt3') {
+        pricePerMB = 0.1;
+    } else if (modelType === 'gpt4') {
+        pricePerMB = 0.11;
+    }
+
+    estimatedPrice = (fileSizeMB * pricePerMB);
+
+    // Stripe kosten: 0.25 cent vaste kosten + 1.5% van het totaal
+    const stripeFixed = 0.25;
+    const stripePercentage = 0.015;
+    const stripeCost = stripeFixed + (estimatedPrice * stripePercentage);
+
+    // Extra kosten: 0.50 cent minimaal + 0.25 cent marge + 1% van het totaal
+    const extraFixed = 0.50;
+    const extraMargin = 0.25;
+    const extraPercentage = 0.01;
+    const extraCost = extraFixed + extraMargin + (estimatedPrice * extraPercentage);
+
+    // Totaal geschatte prijs inclusief alle kosten
+    estimatedPrice += stripeCost + extraCost;
+    
+    estimatedPrice = estimatedPrice.toFixed(2);
+    document.getElementById('priceEstimation').innerHTML = `<strong>Prijs: €${estimatedPrice}</strong>`;
 }
 
 
-</script>
+    document.getElementById('audioFile').addEventListener('change', updatePriceEstimation);
+    document.getElementById('modelType').addEventListener('change', updatePriceEstimation);
 
+    let fieldCount = 1;
+
+    function addDynamicField() {
+        fieldCount++;
+        const newFieldDiv = document.createElement('div');
+        newFieldDiv.className = 'dynamicField';
+        newFieldDiv.innerHTML = `
+            <label for="dynamicField${fieldCount}">Volgende term waar naar gezocht moet worden:</label>
+            <input type="text" id="dynamicField${fieldCount}" name="dynamicField${fieldCount}" placeholder="Actiepunten/besprekkingen/datums/etc.">
+            <button onclick="removeDynamicField(this)">Verwijder veld</button>
+        `;
+
+        document.getElementById('dynamicFields').appendChild(newFieldDiv);
+    }
+
+    function removeDynamicField(buttonElement) {
+        const parentDiv = buttonElement.parentElement;
+        const fieldId = parentDiv.querySelector('input').id;
+
+        if(fieldId !== 'dynamicField1') {
+            parentDiv.remove();
+        }
+    }
+
+    function validateEmail() {
+        const emailInput = document.getElementById('email');
+        const emailError = document.getElementById('emailError');
+        const regex = /^[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,6}$/;
+        if (!regex.test(emailInput.value)) {
+            emailError.style.display = 'block';
+            return false;
+        } else {
+            emailError.style.display = 'none';
+            return true;
+        }
+    }
+</script>
 </body>
 </html>
