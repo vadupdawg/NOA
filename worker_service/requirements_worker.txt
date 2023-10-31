@@ -8,7 +8,9 @@ ffmpeg==1.4
 flask-cors==4.0.0
 google-cloud-storage
 google-cloud-pubsub
+google-cloud-firestore
+google-cloud-secret-manager
+google-auth
 google-cloud-tasks
 ffprobe
-ctransformers
 torch

@@ -1,10 +1,13 @@
 from collections import defaultdict
+import os
+import base64
+import time
 import io
 from io import BytesIO
 from flask_cors import cross_origin
+from flask import Flask, request, jsonify
 from pydub import AudioSegment
 import openai
-import os
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.prompts import PromptTemplate
 from langchain.chat_models import ChatOpenAI
@@ -12,14 +15,11 @@ from langchain.chains import LLMChain
 import logging
 import json
 from google.cloud import storage
+from google.cloud import tasks_v2
+from google.cloud import firestore
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from flask import Flask, request, jsonify
-import base64
-from google.cloud import tasks_v2
-from google.cloud import storage
-import time
 
 CLOUD_BUCKET_NAME = "stt-noa"
 PROJECT = 'stt2langchain1'
@@ -39,13 +39,26 @@ def log_message(message, severity="NOTICE", **additional_fields):
 app = Flask(__name__)
 
 def process_message(message):
+    db = firestore.Client()
+
     message_data = json.loads(message)
     email = message_data.get('email')
     audio_file_name = message_data.get('audio_file_name')
     dynamic_fields = message_data.get('dynamic_fields', {})
     categories = list(dynamic_fields.values())
-    message_data = json.loads(message)
     model_type = message_data.get('model_type')
+    order_id = message_data.get('order_id')
+    amount = message_data.get('amount')
+    order_ref = db.collection('orders').document(order_id)
+
+    user_friendly_data = {
+    'Bestandsnaam': audio_file_name,
+    'E-mail': email,
+    'Model Type': 'GPT-3' if model_type == 'gpt3' else 'GPT-4',
+    'Dynamische Velden': ", ".join([f"{key}: {value}" for key, value in dynamic_fields.items()]),
+    'Order ID': order_id,
+    'Prijs (in centen)': amount
+    }
 
     summaries = []
     transcripts = []
@@ -79,18 +92,49 @@ def process_message(message):
             elif current_key is not None:
                 organized_summaries[current_key].append(line.strip())
 
-
     final_summary = ""
     for key in categories:
-        final_summary += f"{key}:\n"
-        final_summary += ' '.join(organized_summaries[key])
-        final_summary += "\n\n"
+        sub_summary = ' '.join(organized_summaries[key])
+        llm = ChatOpenAI(temperature=0, openai_api_key=os.getenv("OPENAI_API_KEY"), model_name="gpt-3.5-turbo-16k")
+        template ="""
+        Herzie de tekst met de volgende aandachtspunten:
+        Verwijder alle dubbele regels.
+        Verwijder regels die geen informatieve waarde hebben, zoals regels die alleen zeggen "niet vermeld", "geen informatie beschikbaar" of die enkel een opsommingsteken '-' bevatten zonder verdere tekst.
+        Zorg ervoor dat elke regel past binnen het formaat van een notule.
+        Hou het oorspronkelijke formaat aan, compleet met kopjes en opsommingstekens.
 
+        Dit is het huidige verslag dat je moet herzien:
+        "{docs}"
+
+        Elke herziene regel moet op een nieuwe regel worden weergegeven en beginnen met een opsommingsteken '-'.
+
+        Begin nu met herzien:
+        """
+        prompt = PromptTemplate(
+            template=template, input_variables=["docs"]
+        )
+        llmchain = LLMChain(
+            llm=llm,
+            prompt=prompt,
+            verbose=True
+        )
+        revised_sub_summary = llmchain.predict(docs=sub_summary)
+        final_summary += f"\n\n{key}:\n{revised_sub_summary}"
+    
     if email:
         formatted_final_summary = format_summary_text(final_summary)
-        send_email(email, final_transcript, formatted_final_summary)
+        send_email(email, final_transcript, formatted_final_summary, user_friendly_data)
 
-    print(f"Verwerking voltooid. Samenvatting: {final_summary}")
+    extra_data = {
+    'final_transcript': final_transcript,
+    'organized_summaries': organized_summaries,
+    'summaries': summaries,
+    'final_summary': final_summary,
+    'formatted_final_summary': formatted_final_summary,
+    }
+    order_ref.update(extra_data)
+
+    print(f"Verwerking voltooid. Samenvatting: {formatted_final_summary}")
     return "Message processed", 200
 
 def format_summary_text(text):
@@ -103,7 +147,6 @@ def format_summary_text(text):
     formatted_text = '\n'.join(formatted_lines)
     return formatted_text
 
-
 def check_file_upload(bucket_name, blob_name, retries=3, delay=10):
     storage_client = storage.Client()
     bucket = storage_client.bucket(bucket_name)
@@ -115,7 +158,7 @@ def check_file_upload(bucket_name, blob_name, retries=3, delay=10):
             return True
         print(f"Bestand {blob_name} is nog niet geüpload, wachten {delay} seconden...")
         time.sleep(delay)
-        delay *= 2  # Exponentiële backoff
+        delay *= 2
     
     print(f"Bestand {blob_name} is niet geüpload na {retries} pogingen.")
     return False
@@ -146,7 +189,7 @@ def split_audio_file_gcs(bucket_name, blob_name):
     audio_data = blob.download_as_bytes()
     audio = AudioSegment.from_file(io.BytesIO(audio_data), format="mp3")
     
-    chunk_length = 100000
+    chunk_length = 300000
     chunks = [audio[i:i + chunk_length] for i in range(0, len(audio), chunk_length)]
     
     split_files = []
@@ -155,18 +198,15 @@ def split_audio_file_gcs(bucket_name, blob_name):
         chunk.export(buffer, format="mp3")
         
         buffer_size = len(buffer.getbuffer())
-        if buffer_size > 25 * 1024 * 1024:
+        if buffer_size > 20 * 1024 * 1024:
             continue
         
         split_file_path = f"{blob_name}_part_{i}.mp3"
-        
         split_blob = bucket.blob(split_file_path)
         split_blob.upload_from_string(buffer.getvalue(), content_type='audio/mp3')
-        
         split_files.append(split_file_path)
 
     return split_files
-
 
 class CustomDocument:
     def __init__(self, page_content, metadata={}):
@@ -180,13 +220,12 @@ def summarize_transcript(transcript, categories, model_type):
     dynamic_prompt_parts.append("'")
     dynamic_prompt = "\n".join(dynamic_prompt_parts)
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=5000, chunk_overlap=1000
+        chunk_size=5000, chunk_overlap=2500
     )
     if model_type == 'gpt3':
         llm = ChatOpenAI(temperature=0, openai_api_key=os.getenv("OPENAI_API_KEY"), model_name="gpt-3.5-turbo-16k")
     elif model_type == 'gpt4':
         llm = ChatOpenAI(temperature=0, openai_api_key=os.getenv("OPENAI_API_KEY"), model_name="gpt-4")
-
 
     docs = text_splitter.create_documents([transcript])
     
@@ -196,10 +235,11 @@ def summarize_transcript(transcript, categories, model_type):
         '
         Schrijf zo uitgebreid en gedetailleerd mogelijk.
         Voeg onder deze kopjes de desbetreffende informatie met opsommingstekens, een opsommingsteken is "-".
-        Je hoeft dus alleen de kopjes hierboven te gebruiken en kan de rest weglaten.
-        Zorg ervoor dat elke regel opzichzelf genoeg verduidelijking geeft
+        Je hoeft dus alleen de kopjes hierboven te gebruiken en kan de rest weglaten, ook hoef je niet te vertellen als waarnaar gevraagd is niet in de gegeven tekst te vinden is.
+        Zorg ervoor dat elke regel opzichzelf genoeg verduidelijking geeft.
         Dit is een deel van de vergadering:
         "{docs}"
+        Als je niks kan vinden voor een kopje dan hoef je dat niet te vermelden.
         Begin nu:
         """
     prompt = PromptTemplate(
@@ -216,7 +256,7 @@ def summarize_transcript(transcript, categories, model_type):
     
     return results
 
-def send_email(email, transcript, summary):
+def send_email(email, transcript, summary, user_friendly_data):
     from_email = os.environ.get("FROM_EMAIL")
     email_password = os.environ.get("EMAIL_PASSWORD")
     to_email = email
@@ -228,8 +268,34 @@ def send_email(email, transcript, summary):
     msg['To'] = to_email
     msg['Subject'] = subject
 
-    body = f"Transcript:\n{transcript}\nNotule:\n{summary}"
-    msg.attach(MIMEText(body, 'plain'))
+    body = f'''
+        <html>
+            <head></head>
+            <body>
+                <p>Details van uw order:</p>
+                <br>
+                <ul>
+                    <li><strong>Order ID:</strong> {user_friendly_data['Order ID']}</li>
+                    <li><strong>Bestandsnaam:</strong> {user_friendly_data['Bestandsnaam']}</li>
+                    <li><strong>E-mail:</strong> {user_friendly_data['E-mail']}</li>
+                    <li><strong>Model Type:</strong> {user_friendly_data['Model Type']}</li>
+                    <li><strong>Dynamische Velden:</strong> {user_friendly_data['Dynamische Velden']}</li>
+                    <li><strong>Prijs (in centen):</strong> {user_friendly_data['Prijs (in centen)']}</li> 
+                </ul>
+                <br>
+                    <h2>Transcript:</h2>
+                    <pre>{transcript}</pre>
+                    <br>
+                    <h2>Notule:</h2>
+                    <pre>{summary}</pre>
+                    <br>
+                    <p>Met vriendelijke groet,</p>
+                    <p>Het team van GroeimetAi.io</p>
+            </body>
+        </html>
+        '''
+    msg.attach(MIMEText(body, 'html'))
+
 
     smtp_server = "mail.privateemail.com"
     smtp_port = 587 
@@ -247,7 +313,6 @@ project = PROJECT
 queue = 'NOA'
 location = 'europe-west1'
 parent = client.queue_path(project, location, queue)
-
 
 @app.route('/process_message', methods=['POST'])
 @cross_origin()

@@ -1,15 +1,18 @@
 import json
-from flask import Flask, request, jsonify, send_from_directory
-from flask_cors import CORS, cross_origin
+from concurrent import futures
 import os
 import logging
+from datetime import timedelta
+from flask import Flask, request, jsonify
+from flask_cors import CORS, cross_origin
 from google.cloud import pubsub_v1, storage
-from concurrent import futures
 from google.cloud import storage
 from google.cloud import firestore
 from google.oauth2.service_account import Credentials
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 import stripe
-from datetime import timedelta
 
 stripe.api_key = os.getenv("STRIPE_API_KEY")
 
@@ -58,6 +61,50 @@ def publish_message(project_id, topic_id, message):
     
     publish_futures.append(publish_future)
 
+def send_email(email, order_id, user_friendly_data):
+    from_email = os.environ.get("FROM_EMAIL")
+    email_password = os.environ.get("EMAIL_PASSWORD")
+    to_email = email
+
+    subject = "Uw order is aangemaakt!"
+
+    msg = MIMEMultipart()
+    msg['From'] = from_email
+    msg['To'] = to_email
+    msg['Subject'] = subject
+
+    body = f'''
+        <html>
+            <head></head>
+            <body>
+                <p>Transactie voor ordernummer <strong>{order_id}</strong> is voltooid en verwerking is gestart. Uw transcript, tekst en termen om naar te zoeken volgen in de volgende mail!</p>
+                <br>
+                <ul>
+                    <li><strong>Bestandsnaam:</strong> {user_friendly_data['Bestandsnaam']}</li>
+                    <li><strong>Prijs (in centen):</strong> {user_friendly_data['Prijs (in centen)']}</li>
+                    <li><strong>E-mail:</strong> {user_friendly_data['E-mail']}</li>
+                    <li><strong>Model Type:</strong> {user_friendly_data['Model Type']}</li>
+                    <li><strong>Dynamische Velden:</strong> {user_friendly_data['Dynamische Velden']}</li>
+                    <li><strong>Status:</strong> {user_friendly_data['Status']}</li>
+                </ul>
+                <br>
+                <p>Met vriendelijke groet,</p>
+                <p>Het team van GroeimetAi.io</p>
+            </body>
+        </html>
+        '''
+    msg.attach(MIMEText(body, 'html'))
+
+    smtp_server = "mail.privateemail.com"
+    smtp_port = 587 
+
+    server = smtplib.SMTP(smtp_server, smtp_port)
+    server.starttls()
+    server.login(from_email, email_password)
+    text = msg.as_string()
+    server.sendmail(from_email, to_email, text)
+    server.quit()
+
 @app.route('/create-checkout-session', methods=['POST'])
 @cross_origin()
 def create_checkout_session():
@@ -86,6 +133,14 @@ def create_checkout_session():
             'status': 'pending'
         }
         order_ref.set(order_data)
+        user_friendly_data = {
+            'Bestandsnaam': order_data['file_name'],
+            'Prijs (in centen)': order_data['amount'],
+            'E-mail': order_data['email'],
+            'Model Type': 'GPT-3' if order_data['model_type'] == 'gpt3' else 'GPT-4',
+            'Dynamische Velden': ", ".join([f"{key}: {value}" for key, value in order_data['dynamic_fields'].items()]),
+            'Status': 'In behandeling' if order_data['status'] == 'pending' else 'Voltooid'
+        }
 
         checkout_session = stripe.checkout.Session.create(
             client_reference_id=order_ref.id,
@@ -101,11 +156,12 @@ def create_checkout_session():
                 'quantity': 1,
             }],
             mode='payment',
-            success_url='https://frontend-wtajjbsheq-ez.a.run.app/succes.html',
+            success_url='https://frontend-wtajjbsheq-ez.a.run.app/success.html',
             cancel_url='https://frontend-wtajjbsheq-ez.a.run.app/',
         )
-        
-        # Stuur de signed URL terug naar de client, samen met de checkout session ID
+
+        send_email(email, order_ref.id, user_friendly_data)
+
         return jsonify(id=checkout_session.id, signed_url=signed_url)
 
 @app.route('/webhook', methods=['POST'])
@@ -135,7 +191,9 @@ def stripe_webhook():
             'audio_file_name': order_data['file_name'],
             'email': order_data['email'],
             'dynamic_fields': order_data['dynamic_fields'],
-            'model_type': order_data['model_type']
+            'model_type': order_data['model_type'],
+            'order_id': order_id,
+            'amount': order_data['amount']
         })
         publish_message(PROJECT, PUBSUB_TOPIC, message)
 
