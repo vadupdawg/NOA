@@ -114,12 +114,9 @@ def create_checkout_session():
         email = data.get('email')
         modelType = data.get('modelType')
         dynamicFields = data.get('dynamicFields')
+        natural_language_initiator = data.get('natural_language_initiator')
 
         signed_url = generate_signed_url(CLOUD_BUCKET_NAME, file_name)
-        print(file_name)
-        print(amount)
-        print(dynamicFields)
-        print(signed_url)
 
         db = firestore.Client(credentials=credentials)
 
@@ -130,7 +127,8 @@ def create_checkout_session():
             'email': email,
             'model_type': modelType,
             'dynamic_fields': dynamicFields,
-            'status': 'pending'
+            'status': 'pending',
+            'natural_language_initiator': natural_language_initiator,
         }
         order_ref.set(order_data)
         user_friendly_data = {
@@ -139,7 +137,8 @@ def create_checkout_session():
             'E-mail': order_data['email'],
             'Model Type': 'GPT-3' if order_data['model_type'] == 'gpt3' else 'GPT-4',
             'Dynamische Velden': ", ".join([f"{key}: {value}" for key, value in order_data['dynamic_fields'].items()]),
-            'Status': 'In behandeling' if order_data['status'] == 'pending' else 'Voltooid'
+            'Status': 'In behandeling' if order_data['status'] == 'pending' else 'Voltooid',
+            'Slimme termen detectie' : order_data['natural_language_initiator']
         }
 
         checkout_session = stripe.checkout.Session.create(
@@ -193,7 +192,8 @@ def stripe_webhook():
             'dynamic_fields': order_data['dynamic_fields'],
             'model_type': order_data['model_type'],
             'order_id': order_id,
-            'amount': order_data['amount']
+            'amount': order_data['amount'],
+            'natural_language_initiator': order_data['natural_language_initiator'],
         })
         publish_message(PROJECT, PUBSUB_TOPIC, message)
 

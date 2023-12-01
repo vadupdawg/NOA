@@ -7,6 +7,10 @@ from io import BytesIO
 from flask_cors import cross_origin
 from flask import Flask, request, jsonify
 from pydub import AudioSegment
+import spacy
+from spacy.lang.nl.stop_words import STOP_WORDS
+from string import punctuation
+from heapq import nlargest
 import openai
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.prompts import PromptTemplate
@@ -49,16 +53,8 @@ def process_message(message):
     model_type = message_data.get('model_type')
     order_id = message_data.get('order_id')
     amount = message_data.get('amount')
+    natural_language_initiator = message_data.get('natural_language_initiator')
     order_ref = db.collection('orders').document(order_id)
-
-    user_friendly_data = {
-    'Bestandsnaam': audio_file_name,
-    'E-mail': email,
-    'Model Type': 'GPT-3' if model_type == 'gpt3' else 'GPT-4',
-    'Dynamische Velden': ", ".join([f"{key}: {value}" for key, value in dynamic_fields.items()]),
-    'Order ID': order_id,
-    'Prijs (in centen)': amount
-    }
 
     summaries = []
     transcripts = []
@@ -72,12 +68,28 @@ def process_message(message):
         for split_file in split_audio_files:
             transcript = transcribe_audio_gcs(CLOUD_BUCKET_NAME, split_file)
             transcripts.append(transcript)
-            summary = summarize_transcript(transcript, categories, model_type)
+            full_transcript = " ".join(transcripts)
+
+            if natural_language_initiator:
+                shorted_full_transcript = summarize(full_transcript, 0.05)
+                topics = extract_topics_with_gpt4(shorted_full_transcript)
+                categories += [topic.strip() for topic in topics.split(',')]
+                filtered_categories = filter_topics_with_gpt4(categories)
+                        
+            summary = create_notule(transcript, filtered_categories, model_type)
             summaries.append(summary)
     else:
         transcript = transcribe_audio_gcs(CLOUD_BUCKET_NAME, audio_file_name)
         transcripts.append(transcript)
-        summary = summarize_transcript(transcript, categories, model_type)
+        full_transcript = " ".join(transcripts)
+
+        if natural_language_initiator:
+            shorted_full_transcript = summarize(full_transcript, 0.05)
+            topics = extract_topics_with_gpt4(shorted_full_transcript)
+            categories += [topic.strip() for topic in topics.split(',')]
+            filtered_categories = filter_topics_with_gpt4(categories)
+        
+        summary = create_notule(transcript, filtered_categories, model_type)
         summaries.append(summary)
 
     final_summary = "\n".join(summaries)
@@ -99,16 +111,12 @@ def process_message(message):
         template ="""
         Herzie de tekst met de volgende aandachtspunten:
         Verwijder alle dubbele regels.
-        Verwijder regels die geen informatieve waarde hebben, zoals regels die alleen zeggen "niet vermeld", "geen informatie beschikbaar" of die enkel een opsommingsteken '-' bevatten zonder verdere tekst.
+        Als in het gegeven deel van de verslag/vergadering staat dat geen informatie is gegeven, verwijder dan de regel waarin dat vermeldt wordt.
         Zorg ervoor dat elke regel past binnen het formaat van een notule.
         Hou het oorspronkelijke formaat aan, compleet met kopjes en opsommingstekens.
-
+        Elke herziene regel moet op een nieuwe regel worden weergegeven en beginnen met een opsommingsteken '-'.
         Dit is het huidige verslag dat je moet herzien:
         "{docs}"
-
-        Elke herziene regel moet op een nieuwe regel worden weergegeven en beginnen met een opsommingsteken '-'.
-
-        Begin nu met herzien:
         """
         prompt = PromptTemplate(
             template=template, input_variables=["docs"]
@@ -121,9 +129,18 @@ def process_message(message):
         revised_sub_summary = llmchain.predict(docs=sub_summary)
         final_summary += f"\n\n{key}:\n{revised_sub_summary}"
     
+        user_friendly_data = {
+        'Bestandsnaam': audio_file_name,
+        'E-mail': email,
+        'Model Type': 'GPT-3' if model_type == 'gpt3' else 'GPT-4',
+        'Dynamische Velden': ", ".join([f"{key}: {value}" for key, value in dynamic_fields.items()]),
+        'Order ID': order_id,
+        'Prijs (in centen)': amount
+        }
+
     if email:
         formatted_final_summary = format_summary_text(final_summary)
-        send_email(email, final_transcript, formatted_final_summary, user_friendly_data)
+        send_email(email, shorted_full_transcript, topics, final_transcript, formatted_final_summary, user_friendly_data)
 
     extra_data = {
     'final_transcript': final_transcript,
@@ -136,6 +153,70 @@ def process_message(message):
 
     print(f"Verwerking voltooid. Samenvatting: {formatted_final_summary}")
     return "Message processed", 200
+
+def summarize(text, per):
+    nlp = spacy.load('nl_core_news_lg')
+    doc = nlp(text)
+    tokens =[token.text for token in doc]
+    word_frequencies={}
+    for word in doc:
+        if word.text.lower() not in list(STOP_WORDS):
+            if word.text.lower() not in punctuation:
+                if word.text not in word_frequencies.keys():
+                    word_frequencies[word.text] = 1
+                else:
+                    word_frequencies[word.text] += 1
+    max_frequency=max(word_frequencies.values())
+    for word in word_frequencies.keys():
+        word_frequencies[word]=word_frequencies[word]/max_frequency
+    sentence_tokens= [sent for sent in doc.sents]
+    sentence_scores = {}
+    for sent in sentence_tokens:
+        for word in sent:
+            if word.text.lower() in word_frequencies.keys():
+                if sent not in sentence_scores.keys():                            
+                    sentence_scores[sent]=word_frequencies[word.text.lower()]
+                else:
+                    sentence_scores[sent]+=word_frequencies[word.text.lower()]
+    select_length = max(1, int(len(sentence_tokens) * per))
+    summary = nlargest(select_length, sentence_scores, key=sentence_scores.get)
+    ordered_summary = sorted(summary, key=lambda s: sentence_tokens.index(s))
+    final_summary = ' '.join([sent.text for sent in ordered_summary])
+    print(final_summary)
+    return final_summary
+
+def extract_topics_with_gpt4(text):
+    openai.api_key = os.getenv("OPENAI_API_KEY")
+
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4", 
+            temperature=0,
+            messages=[
+                {"role": "system", "content": "Identificeer de grote, overkoepelende, onderwerpen in de volgende tekst voor als kopjes in een notule. Benoem echt alleen de onderwerpen gescheiden door een kommateken:"},
+                {"role": "user", "content": text},
+            ]
+        )
+        
+        topics = response['choices'][0]['message']['content']
+        return topics
+    except openai.error.OpenAIError as e:
+        return f"Er is een fout opgetreden: {str(e)}"
+    
+def filter_topics_with_gpt4(text):
+        openai.api_key = os.getenv("OPENAI_API_KEY")
+
+        response = openai.ChatCompletion.create(
+            model="gpt-4", 
+            temperature=0,
+            messages=[
+                {"role": "system", "content": "Filter deze tekst op dubbele inputs en geef de lijst terug, voeg eventuele erg vergelijkbare kopjes samen. Houdt het format hetzelfde:"},
+                {"role": "user", "content": text},
+            ]
+        )
+        
+        topics = response['choices'][0]['message']['content']
+        return topics
 
 def format_summary_text(text):
     formatted_lines = []
@@ -213,7 +294,7 @@ class CustomDocument:
         self.page_content = page_content
         self.metadata = metadata
 
-def summarize_transcript(transcript, categories, model_type):
+def create_notule(transcript, categories, model_type):
     dynamic_prompt_parts = ["Extraheer uit het deel van de vergadering de volgende informatie\n'"]
     for cat in categories:
         dynamic_prompt_parts.append(f"{cat}:")
@@ -235,12 +316,10 @@ def summarize_transcript(transcript, categories, model_type):
         '
         Schrijf zo uitgebreid en gedetailleerd mogelijk.
         Voeg onder deze kopjes de desbetreffende informatie met opsommingstekens, een opsommingsteken is "-".
-        Je hoeft dus alleen de kopjes hierboven te gebruiken en kan de rest weglaten, ook hoef je niet te vertellen als waarnaar gevraagd is niet in de gegeven tekst te vinden is.
+        De punten waar je de tekst op moet extraheren, ook hoef je niet te vertellen als waarnaar gevraagd is niet in de gegeven tekst te vinden is.
         Zorg ervoor dat elke regel opzichzelf genoeg verduidelijking geeft.
         Dit is een deel van de vergadering:
         "{docs}"
-        Als je niks kan vinden voor een kopje dan hoef je dat niet te vermelden.
-        Begin nu:
         """
     prompt = PromptTemplate(
         template=template, input_variables=["dynamic_prompt", "docs"]
@@ -256,7 +335,7 @@ def summarize_transcript(transcript, categories, model_type):
     
     return results
 
-def send_email(email, transcript, summary, user_friendly_data):
+def send_email(email, shorted_full_transcript, topics, transcript, summary, user_friendly_data):
     from_email = os.environ.get("FROM_EMAIL")
     email_password = os.environ.get("EMAIL_PASSWORD")
     to_email = email
@@ -285,6 +364,12 @@ def send_email(email, transcript, summary, user_friendly_data):
                 <br>
                     <h2>Transcript:</h2>
                     <pre>{transcript}</pre>
+                    <br>
+                    <h2>Samenvatting:</h2>
+                    <pre>{shorted_full_transcript}</pre>
+                    <br>
+                    <h2>Onderwerpen:</h2>
+                    <pre>{topics}</pre>
                     <br>
                     <h2>Notule:</h2>
                     <pre>{summary}</pre>

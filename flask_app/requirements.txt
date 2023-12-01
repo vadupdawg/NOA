@@ -7,6 +7,7 @@ google-cloud-firestore
 werkzeug==2.2.3
 six
 google-cloud-secret-manager
+google-cloud-language
 google-auth
 ffprobe
 ffmpeg

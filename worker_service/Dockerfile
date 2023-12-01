@@ -10,11 +10,11 @@ WORKDIR /app
 RUN apt-get update \
     && apt-get install -y ffmpeg \
     && rm -rf /var/lib/apt/lists/*
-RUN pip install --upgrade pip
 
 # Kopieer alleen requirements.txt eerst om de Docker cache beter te benutten
 COPY requirements_worker.txt /app/
 RUN pip install --no-cache-dir -r requirements_worker.txt
+RUN python -m spacy download nl_core_news_lg
 
 # Kopieer de huidige mapinhoud naar de container
 COPY . /app/

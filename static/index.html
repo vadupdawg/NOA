@@ -71,6 +71,18 @@
                 background-color: #45a049;
             }
 
+            .detectBtn {
+                width: 200px;
+                background-color: #4CAF50;
+                font-size: 18px;
+                margin: 15px auto;
+                display: block;
+                transition: background-color 0.3s ease;
+            }
+
+            .detectBtn:hover {
+                background-color: #45a049;
+            }
         
             button:hover {
                 background-color: #0056b3;
@@ -148,6 +160,8 @@
             <option value="gpt3">GPT-3</option>
             <option value="gpt4">GPT-4</option>
         </select>
+
+        <button class="detectBtn" onclick="startCheckout('buttonClick')">Slimme Termen Detectie</button>
         
         <div id="priceEstimation"><strong>Prijs: €0.00</strong></div>
 
@@ -171,7 +185,77 @@
 <script>
     var stripe = Stripe('pk_live_51NVZCAI2xDWQZFzgWHGJboKPKRl2opSMzSlvbOqiKrlrXaEQ8rLDUZtgSKyL4SVWyGUdnCuttjehnjcjYkawDZBf00KFlH0xWE');
 
-    async function startCheckout() {
+    async function startCheckout(initiator = "default") {
+
+        if (initiator === "buttonClick") {
+        console.log("Checkout geïnitieerd via Slimme Termen Detectie knop");
+        document.getElementById("overlay").style.display = "block";
+        const estimatedPrice = Math.round(parseFloat(document.getElementById('priceEstimation').textContent.replace('Prijs: €', '')) * 100);
+        console.log("Estimated Price:", estimatedPrice);
+
+        const email = document.getElementById('email').value;
+        const modelType = document.getElementById('modelType').value;
+        const file = document.getElementById('audioFile').files[0];
+        const fileName = file.name;
+
+        let dynamicFields = {};
+        for (let i = 1; i <= fieldCount; i++) {
+            const fieldElement = document.getElementById(`dynamicField${i}`);
+            if (fieldElement) {
+                dynamicFields[`dynamicField${i}`] = fieldElement.value;
+            }
+        }
+
+        const payload = {
+            fileName,
+            amount: estimatedPrice,
+            email,
+            modelType,
+            dynamicFields: {},
+            natural_language_initiator: "natural_language_initiator"
+            };
+
+        const sessionResponse = await fetch('https://flask-app-wtajjbsheq-ez.a.run.app/create-checkout-session', {
+            method: 'POST',
+            headers: {
+            'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(payload)
+        });
+        console.log("sessionResponse:", sessionResponse)
+
+        const sessionData = await sessionResponse.json();
+        console.log("Session Data:", sessionData); 
+        const signedUrl = sessionData.signed_url;
+        console.log("signedUrl:", signedUrl)
+        const sessionId = sessionData.id;
+
+        if (signedUrl) {
+            const uploadResponse = await fetch(signedUrl, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/octet-stream'
+                },
+                body: file
+            });
+
+            if (uploadResponse.ok) {
+                console.log('File successfully uploaded');
+            } else {
+                console.log('File upload failed');
+            }
+        }
+
+        const {error} = await stripe.redirectToCheckout({
+            sessionId: sessionId
+        });
+
+        if (error) {
+            console.log(error);
+        }
+        document.getElementById("overlay").style.display = "none";
+        
+    } else {
     document.getElementById("overlay").style.display = "block";
     const estimatedPrice = Math.round(parseFloat(document.getElementById('priceEstimation').textContent.replace('Prijs: €', '')) * 100);
     console.log("Estimated Price:", estimatedPrice);
@@ -237,6 +321,7 @@
     }
     document.getElementById("overlay").style.display = "none";
     }
+}
 
     function updatePriceEstimation() {
     const fileSizeMB = document.getElementById('audioFile').files[0]?.size / (1024 * 1024);
