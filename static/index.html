@@ -146,7 +146,7 @@
 <body>
     <div class="container">
         <h1>Notuleer uw audio bestand op termen naar wens!</h1>
-        <p>Selecteer een audiobestand, voer uw e-mailadres in en voer de gewenste zoektermen in. Het systeem zal het audiobestand scannen op basis van uw ingevoerde termen.</p>
+        <h2>Selecteer een audiobestand, voer uw e-mailadres en druk op 'Upload', Het systeem zal het audiobestand scannen op basis van uw ingevoerde termen.</h2>
 
         <input type="file" id="audioFile" accept="audio/*" onchange="updatePriceEstimation()">
         <span id="fileError" style="color: red; display: none;">Selecteer een audiobestand.</span>
@@ -157,11 +157,10 @@
 
         <label for="modelType">Kies het modeltype:</label>
         <select id="modelType">
-            <option value="gpt3">GPT-3</option>
             <option value="gpt4">GPT-4</option>
         </select>
 
-        <button class="detectBtn" onclick="startCheckout('buttonClick')">Slimme Termen Detectie</button>
+        <button class="detectBtn" onclick="startCheckout('buttonClick')">Upload</button>
         
         <div id="priceEstimation"><strong>Prijs: €0.00</strong></div>
 
@@ -169,7 +168,7 @@
         <div id="dynamicFields">
             <div class="dynamicField">
                 <label for="dynamicField1">Term waar naar gezocht moet worden:</label>
-                <input type="text" id="dynamicField1" name="dynamicField1" placeholder="Actiepunten/besprekkingen/datums/etc.">
+                <input type="text" id="dynamicField1" name="dynamicField1" placeholder="Actiepunten/besprekkingen/datums/agendapunten/etc.">
                 <span id="dynamicFieldError" style="color: red; display: none;">Vul ten minste één zoekterm in.</span>
             </div>
         </div>
@@ -324,14 +323,25 @@
 }
 
     function updatePriceEstimation() {
-    const fileSizeMB = document.getElementById('audioFile').files[0]?.size / (1024 * 1024);
+            const file = document.getElementById('audioFile').files[0];
+    if (file) {
+        const fileSizeMB = file.size / (1024 * 1024);
+        const fileSizeGB = fileSizeMB / 1024;
+        const maxFileSizeGB = 1; // Maximale bestandsgrootte in GB
+
+        if (fileSizeGB > maxFileSizeGB) {
+            alert(`Het bestand is te groot. De maximale bestandsgrootte is ${maxFileSizeGB} GB.`);
+            document.getElementById('audioFile').value = ''; // Reset het bestandsveld
+            return; // Stop de verdere uitvoering van de functie
+        }
+
     const modelType = document.getElementById('modelType').value;
 
     let pricePerMB;
     if (modelType === 'gpt3') {
         pricePerMB = 0.11;
     } else if (modelType === 'gpt4') {
-        pricePerMB = 0.14;
+        pricePerMB = 0.25;
     }
 
     estimatedPrice = (fileSizeMB * pricePerMB);
@@ -341,7 +351,7 @@
     const stripeCost = stripeFixed + (estimatedPrice * stripePercentage);
     const extraFixed = 0.50;
     const extraMargin = 0.25;
-    const extraPercentage = 0.01;
+    const extraPercentage = 0.02;
     const extraCost = extraFixed + extraMargin + (estimatedPrice * extraPercentage);
 
     estimatedPrice += stripeCost + extraCost;
@@ -349,6 +359,7 @@
     estimatedPrice = estimatedPrice.toFixed(2);
     document.getElementById('priceEstimation').innerHTML = `<strong>Prijs: €${estimatedPrice}</strong>`;
 }
+    }
     document.getElementById('audioFile').addEventListener('change', updatePriceEstimation);
     document.getElementById('modelType').addEventListener('change', updatePriceEstimation);
 

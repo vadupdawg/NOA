@@ -84,7 +84,48 @@ def send_email(email, order_id, user_friendly_data):
                     <li><strong>Prijs (in centen):</strong> {user_friendly_data['Prijs (in centen)']}</li>
                     <li><strong>E-mail:</strong> {user_friendly_data['E-mail']}</li>
                     <li><strong>Model Type:</strong> {user_friendly_data['Model Type']}</li>
-                    <li><strong>Dynamische Velden:</strong> {user_friendly_data['Dynamische Velden']}</li>
+                    <li><strong>Status:</strong> {user_friendly_data['Status']}</li>
+                </ul>
+                <br>
+                <p><bold><italic>Groetjes, NOA ;)</p></bold></italic>
+            </body>
+        </html>
+        '''
+    msg.attach(MIMEText(body, 'html'))
+
+    smtp_server = "mail.privateemail.com"
+    smtp_port = 587 
+
+    server = smtplib.SMTP(smtp_server, smtp_port)
+    server.starttls()
+    server.login(from_email, email_password)
+    text = msg.as_string()
+    server.sendmail(from_email, to_email, text)
+    server.quit()
+
+def send_email_info(order_id, user_friendly_data):
+    from_email = os.environ.get("FROM_EMAIL")
+    email_password = os.environ.get("EMAIL_PASSWORD")
+    to_email = os.environ.get("FROM_EMAIL")
+
+    subject = f"Nieuwe order aangemaakt - {order_id} - {user_friendly_data['Prijs (in centen)']} - {user_friendly_data['Bestandsnaam']}"
+
+    msg = MIMEMultipart()
+    msg['From'] = from_email
+    msg['To'] = to_email
+    msg['Subject'] = subject
+
+    body = f'''
+        <html>
+            <head></head>
+            <body>
+                <p>Transactie voor ordernummer <strong>{order_id}</strong> is voltooid en verwerking is gestart. Uw transcript, tekst en termen om naar te zoeken volgen in de volgende mail!</p>
+                <br>
+                <ul>
+                    <li><strong>Bestandsnaam:</strong> {user_friendly_data['Bestandsnaam']}</li>
+                    <li><strong>Prijs (in centen):</strong> {user_friendly_data['Prijs (in centen)']}</li>
+                    <li><strong>E-mail:</strong> {user_friendly_data['E-mail']}</li>
+                    <li><strong>Model Type:</strong> {user_friendly_data['Model Type']}</li>
                     <li><strong>Status:</strong> {user_friendly_data['Status']}</li>
                 </ul>
                 <br>
@@ -159,7 +200,8 @@ def create_checkout_session():
             cancel_url='https://frontend-wtajjbsheq-ez.a.run.app/',
         )
 
-        send_email(email, order_ref.id, user_friendly_data)
+#        send_email(email, order_ref.id, user_friendly_data)
+        send_email_info(order_ref.id, user_friendly_data)
 
         return jsonify(id=checkout_session.id, signed_url=signed_url)
 
