@@ -1,8 +1,0 @@
-[
-    {
-        "origin": ["https://frontend-wtajjbsheq-ez.a.run.app"],
-        "responseHeader": ["Content-Type"],
-        "method": ["PUT", "GET", "POST", "DELETE"],
-        "maxAgeSeconds": 3600
-    }
-]
